@@ -1,0 +1,64 @@
+name: guard
+
+# pull_request_target runs this workflow as defined on main, so a PR cannot
+# edit it to pass. The PR's files are only read, never executed.
+on:
+  pull_request_target:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  md-only-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Every file is Markdown (only the two workflow files are exempt)
+        run: |
+          bad=$(git ls-files \
+            | grep -v -E '\.md$' \
+            | grep -v -x -E '\.github/workflows/(guard|md-only)\.yml' || true)
+          if [ -n "$bad" ]; then
+            echo "Files that are not .md:"; echo "$bad"; exit 1
+          fi
+
+      - name: No symlinks
+        run: |
+          links=$(git ls-files -s | awk '$1 == "120000" {print $4}')
+          if [ -n "$links" ]; then
+            echo "Symlinks are not allowed:"; echo "$links"; exit 1
+          fi
+
+      - name: .md files are text, not disguised binaries
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            case "$f" in *.md) ;; *) continue ;; esac
+            [ -s "$f" ] || continue
+            if [ "$(file -b --mime-encoding -- "$f")" = "binary" ]; then
+              echo "Binary content in $f"; fail=1
+            fi
+          done < <(git ls-files)
+          exit $fail
+
+      - name: PRs must not modify .github/
+        if: github.event_name == 'pull_request_target'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE"...HEAD -- .github || true)
+          if [ -n "$changed" ]; then
+            echo "PRs may not change .github/ (the enforcement lives there):"
+            echo "$changed"; exit 1
+          fi
